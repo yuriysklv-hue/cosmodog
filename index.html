@@ -1,0 +1,1485 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Космический пёс</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #0a0a2a;
+      overflow: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      font-family: 'Segoe UI', sans-serif;
+    }
+    canvas {
+      /* Игра уменьшается под окно, сохраняя пропорции 3:2 (900x600).
+         Берём самое маленькое из трёх: родной размер, ширина окна, высота окна × 1.5 */
+      width: min(900px, calc(100vw - 24px), calc((100vh - 24px) * 1.5));
+      height: auto;
+      border: 2px solid #4a4aaa;
+      border-radius: 8px;
+      box-shadow: 0 0 40px rgba(80, 80, 255, 0.3);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="900" height="600"></canvas>
+
+  <script>
+    // === НАСТРОЙКИ ИГРЫ ===
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const W = 900;   // «игровые» размеры — в них считается вся игра
+    const H = 600;
+
+    // Чёткая картинка на Retina-экранах (MacBook): у такого экрана в каждом
+    // «пикселе» 2x2 настоящих точки. Делаем холст во столько же раз больше,
+    // а рисуем по-прежнему в координатах 900x600 — масштаб делает браузер.
+    const DPR = window.devicePixelRatio || 1;
+    canvas.width = W * DPR;
+    canvas.height = H * DPR;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // === СОСТОЯНИЕ ИГРЫ ===
+    // 'menu' — выбор сложности, 'playing' — игра идёт, 'won' — победа
+    let gameState = 'menu';
+    let selectedDifficulty = null;
+
+    // === УРОВНИ СЛОЖНОСТИ ===
+    const DIFFICULTIES = {
+      easy: {
+        name: 'Лёгкий',
+        color: '#2ecc40',
+        maxGifts: 5,
+        minSpawnDist: 100,
+        maxReds: 1,
+        redChance: 0.15,
+        target: 15,
+        redSpeed: 0.5,
+        redLifetime: 500,
+        ghostSpeed: 0.5,      // скорость привидений
+        foodDelay: [600, 900],    // корм: через сколько кадров появится (10–15 сек)
+        desc: '5 подарков, мало красных',
+      },
+      medium: {
+        name: 'Средний',
+        color: '#ffdd44',
+        maxGifts: 4,
+        minSpawnDist: 160,
+        maxReds: 1,
+        redChance: 0.25,
+        target: 20,
+        redSpeed: 0.8,
+        redLifetime: 500,
+        ghostSpeed: 0.7,
+        foodDelay: [900, 1200],   // 15–20 сек
+        desc: '4 подарка, красные чаще',
+      },
+      hard: {
+        name: 'Сложный',
+        color: '#ff8844',
+        maxGifts: 3,
+        minSpawnDist: 220,
+        maxReds: 2,
+        redChance: 0.35,
+        target: 25,
+        redSpeed: 1.2,
+        redLifetime: 500,
+        ghostSpeed: 1.0,
+        foodDelay: [1200, 1500],  // 20–25 сек
+        desc: '3 подарка, красных много',
+      },
+      nightmare: {
+        name: 'Кошмар',
+        color: '#ff4444',
+        maxGifts: 2,
+        minSpawnDist: 280,
+        maxReds: 2,
+        redChance: 0.45,
+        target: 30,
+        redSpeed: 1.6,
+        redLifetime: 500,
+        ghostSpeed: 1.4,
+        foodDelay: [1500, 2100],  // 25–35 сек
+        desc: '2 подарка, красные повсюду',
+      },
+    };
+
+    // === РЕПЛИКИ СОБАКИ ===
+    // Егор, это твой раздел! Сюда можно дописывать свои фразы:
+    // просто добавь новую строку в кавычках и поставь запятую в конце.
+    // Собака выбирает фразу случайно и не повторяет одну и ту же два раза подряд.
+    const PHRASES = {
+      start: [
+        'Хвост пристёгнут, шлем надет. Поехали!',
+        'Хьюстон, у нас подарки!',
+        'Где-то тут пахнет подарками...',
+        'Один маленький шаг для пса — огромный прыжок для всех собак!',
+      ],
+      gift: [
+        'Ням! Ой, это же не еда...',
+        'Ещё один в копилку!',
+        'Гав! Мой подарочек!',
+        'Хвост виляет сам собой!',
+        'Кто молодец? Я молодец!',
+        'Подарок? Мне? Как неожиданно!',
+      ],
+      redGift: [
+        'Ай! Он меня за нос укусил!',
+        'Подарок с ногами — это не подарок, а хулиган!',
+        'Минус два?! Я требую адвоката!',
+        'Надо было смотреть на ножки...',
+        'Эй, верни мои подарки, вор на ножках!',
+      ],
+      halfway: [
+        'Половина пути! Хвост ещё не устал.',
+        'Уже половина! Я почти легенда.',
+      ],
+      almost: [
+        'Ещё чуть-чуть! Я вижу финиш!',
+        'Осталось совсем немного — не подведите, лапы!',
+      ],
+      ghostNear: [
+        'Чую привидение... и оно не пахнет колбасой.',
+        'Ой-ой, кто-то сзади дышит!',
+        'Шерсть дыбом! Привидение рядом!',
+        'Только не смотри ему в глаза!',
+      ],
+      hit: [
+        'Ауч! Это было холодно!',
+        'Эй! Я же в шлеме, так нечестно!',
+        'Привидения кусаются? Никто не предупреждал!',
+        'Бу-бу-бу — сам ты бу!',
+      ],
+      lastLife: [
+        'Последнее сердечко! Теперь аккуратно...',
+        'Где моя миска?! Срочно!',
+        'Режим осторожного пса включён!',
+      ],
+      foodAppeared: [
+        'Я чую корм! Где-то рядом!',
+        'Миска! Моя прелесть!',
+        'Обед по расписанию!',
+      ],
+      ateFood: [
+        'Хрум-хрум! Вот теперь живём!',
+        'Космический корм — лучший корм!',
+        'Сил прибавилось! Привидения, берегитесь!',
+      ],
+      win: [
+        'Я самый космический пёс во Вселенной!',
+        'Все подарки мои! Можно теперь поспать?',
+      ],
+      lose: [
+        'Я вернусь... после обеда.',
+        'Сегодня победили привидения. Но завтра — мой день!',
+        'Гав... Ну ничего, попробуем ещё!',
+      ],
+    };
+
+    // Важность событий: важная фраза перебивает менее важную,
+    // а неважная ждёт, пока собака договорит
+    const PHRASE_PRIORITY = {
+      gift: 1,
+      start: 2, ghostNear: 2, foodAppeared: 2,
+      redGift: 3, ateFood: 3, halfway: 3, almost: 3,
+      hit: 4,
+      lastLife: 5,
+      win: 6, lose: 6,
+    };
+
+    // === ИГРОК ===
+    const player = {
+      x: W / 2,
+      y: H / 2,
+      size: 50,
+      speed: 3,
+      animFrame: 0,
+    };
+
+    // === УПРАВЛЕНИЕ ===
+    const keys = {};
+    // e.code — это физическая клавиша, а не буква. Поэтому WASD работает
+    // и на русской раскладке (там на этих клавишах Ц, Ф, Ы, В).
+    window.addEventListener('keydown', (e) => {
+      keys[e.code] = true;
+
+      // Стрелки не должны прокручивать страницу
+      if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+
+      // Пауза: P или Esc (e.repeat — клавишу держат зажатой, это не новое нажатие)
+      if ((e.code === 'KeyP' || e.code === 'Escape') && !e.repeat) {
+        togglePause();
+      }
+    });
+    window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+    // Ушёл в другое окно или вкладку — ставим паузу, чтобы привидения не съели собаку,
+    // и «отпускаем» все клавиши (иначе собака может уехать сама)
+    function autoPause() {
+      for (let k in keys) keys[k] = false;
+      if (gameState === 'playing') gameState = 'paused';
+    }
+    window.addEventListener('blur', autoPause);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) autoPause();
+    });
+
+    // === ПАУЗА ===
+    function togglePause() {
+      if (gameState === 'playing') gameState = 'paused';
+      else if (gameState === 'paused') gameState = 'playing';
+    }
+
+    // === КЛИКИ МЫШИ (для меню) ===
+    let mouseX = 0, mouseY = 0, mouseClicked = false;
+    // Холст может быть уменьшен под окно, поэтому переводим координаты
+    // мыши на экране в «игровые» координаты 900x600
+    function updateMouse(e) {
+      const rect = canvas.getBoundingClientRect();
+      // clientLeft/clientTop — толщина рамки, clientWidth — ширина без рамки
+      mouseX = (e.clientX - rect.left - canvas.clientLeft) * W / canvas.clientWidth;
+      mouseY = (e.clientY - rect.top - canvas.clientTop) * H / canvas.clientHeight;
+    }
+    canvas.addEventListener('mousemove', updateMouse);
+    canvas.addEventListener('click', (e) => {
+      updateMouse(e);
+      mouseClicked = true;
+    });
+
+    // === ЗВЁЗДЫ ===
+    const stars = [];
+    for (let i = 0; i < 100; i++) {
+      stars.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        size: Math.random() * 2 + 0.5,
+        twinkle: Math.random()
+      });
+    }
+
+    // === ПОДАРКИ ===
+    let giftsCollected = 0;
+    const gifts = [];
+
+    // === ЖИЗНИ И ПРИВИДЕНИЯ ===
+    let lives = 3;
+    const MAX_LIVES = 3;
+    let invulnTimer = 0;     // таймер неуязвимости после удара
+    const ghosts = [];
+
+    // === КОРМ (восстанавливает жизнь) ===
+    let food = null;          // миска на экране (или null, если её нет)
+    let foodTimer = 0;        // сколько кадров осталось до появления миски
+    const FOOD_LIFETIME = 420;  // миска лежит 7 секунд (420 кадров)
+
+    // === ВСПЛЫВАЮЩИЕ НАДПИСИ («+1 ❤» и т.п.) ===
+    const popups = [];
+
+    // === ТЕКУЩАЯ РЕПЛИКА СОБАКИ ===
+    let comment = null;        // { text, age, duration, priority } или null
+    let lastPhrase = '';       // чтобы не повторять фразу два раза подряд
+    let ghostWarnCooldown = 0; // пауза между предупреждениями о привидениях
+    let saidHalfway = false;   // «половина пути» говорим один раз за игру
+    let saidAlmost = false;    // «почти финиш» — тоже один раз
+
+    // Палитра цветов подарков
+    const GIFT_COLORS = [
+      { fill: '#2ecc40', stroke: '#27ae38' },  // зелёный
+      { fill: '#3498db', stroke: '#2980b9' },  // синий
+      { fill: '#9b59b6', stroke: '#8e44ad' },  // фиолетовый
+      { fill: '#e91e63', stroke: '#c2185b' },  // розовый
+      { fill: '#e67e22', stroke: '#d35400' },  // оранжевый
+      { fill: '#1abc9c', stroke: '#16a085' },  // бирюзовый
+      { fill: '#f39c12', stroke: '#d68910' },  // жёлтый
+    ];
+
+    // === ДВИЖЕНИЕ ИГРОКА ===
+    function updatePlayer() {
+      // Стрелки или WASD
+      if (keys['ArrowLeft']  || keys['KeyA']) player.x -= player.speed;
+      if (keys['ArrowRight'] || keys['KeyD']) player.x += player.speed;
+      if (keys['ArrowUp']    || keys['KeyW']) player.y -= player.speed;
+      if (keys['ArrowDown']  || keys['KeyS']) player.y += player.speed;
+
+      if (player.x < player.size) player.x = player.size;
+      if (player.x > W - player.size) player.x = W - player.size;
+      if (player.y < player.size * 1.3) player.y = player.size * 1.3;
+      if (player.y > H - player.size * 1.3) player.y = H - player.size * 1.3;
+
+      player.animFrame += 0.02;
+    }
+
+    // === МЕРЦАНИЕ ЗВЁЗД ===
+    function updateStars() {
+      for (let s of stars) s.twinkle += 0.03;
+    }
+
+    // === РИСУЕМ ФОН ===
+    function drawBackground() {
+      const grad = ctx.createLinearGradient(0, 0, 0, H);
+      grad.addColorStop(0, '#0a0a2a');
+      grad.addColorStop(1, '#1a1a4a');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, W, H);
+
+      for (let s of stars) {
+        const brightness = 0.4 + Math.sin(s.twinkle) * 0.3;
+        ctx.fillStyle = `rgba(255, 255, 255, ${brightness})`;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // === РИСУЕМ СОБАКУ ===
+    function drawDog(x, y, size) {
+      ctx.save();
+      ctx.translate(x, y);
+
+      const sway = Math.sin(player.animFrame) * 2;
+      const bounce = Math.sin(player.animFrame * 2) * 1;
+
+      const furColor = '#d4a05a';
+      const furDark = '#b88440';
+      const bellyColor = '#f0e0c0';
+
+      // Хвост
+      ctx.save();
+      ctx.translate(-size * 0.35, -size * 0.3);
+      ctx.rotate(-0.6 + Math.sin(player.animFrame * 3) * 0.3);
+      ctx.fillStyle = furDark;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, size * 0.1, size * 0.35, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // Задние лапы
+      ctx.fillStyle = furDark;
+      ctx.beginPath();
+      ctx.ellipse(-size * 0.28, size * 0.85, size * 0.16, size * 0.18, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(size * 0.28, size * 0.85, size * 0.16, size * 0.18, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Тело
+      ctx.fillStyle = furColor;
+      ctx.beginPath();
+      ctx.ellipse(0, size * 0.25 + bounce, size * 0.42, size * 0.55, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Живот
+      ctx.fillStyle = bellyColor;
+      ctx.beginPath();
+      ctx.ellipse(0, size * 0.3 + bounce, size * 0.22, size * 0.4, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Тень тела
+      ctx.fillStyle = furDark;
+      ctx.globalAlpha = 0.3;
+      ctx.beginPath();
+      ctx.ellipse(size * 0.2, size * 0.25 + bounce, size * 0.15, size * 0.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      // Передние лапы
+      ctx.fillStyle = furColor;
+      ctx.beginPath();
+      ctx.ellipse(-size * 0.38, size * 0.3 + bounce, size * 0.1, size * 0.3, -0.15, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = furDark;
+      ctx.beginPath();
+      ctx.ellipse(-size * 0.4, size * 0.55 + bounce, size * 0.1, size * 0.08, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = furColor;
+      ctx.beginPath();
+      ctx.ellipse(size * 0.38, size * 0.3 + bounce, size * 0.1, size * 0.3, 0.15, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = furDark;
+      ctx.beginPath();
+      ctx.ellipse(size * 0.4, size * 0.55 + bounce, size * 0.1, size * 0.08, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Шея
+      ctx.fillStyle = furColor;
+      ctx.fillRect(-size * 0.15, -size * 0.15, size * 0.3, size * 0.25);
+
+      // Ошейник
+      ctx.fillStyle = '#cc3333';
+      ctx.fillRect(-size * 0.18, -size * 0.05, size * 0.36, size * 0.08);
+      ctx.fillStyle = '#ffdd44';
+      ctx.beginPath();
+      ctx.arc(0, -size * 0.01, size * 0.05, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Голова
+      ctx.save();
+      ctx.translate(sway, bounce);
+
+      ctx.fillStyle = furDark;
+      ctx.beginPath();
+      ctx.ellipse(-size * 0.4, -size * 0.25, size * 0.13, size * 0.3, -0.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(size * 0.4, -size * 0.25, size * 0.13, size * 0.3, 0.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = furColor;
+      ctx.beginPath();
+      ctx.arc(0, -size * 0.35, size * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = bellyColor;
+      ctx.beginPath();
+      ctx.ellipse(0, -size * 0.22, size * 0.22, size * 0.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#1a1a1a';
+      ctx.beginPath();
+      ctx.arc(-size * 0.15, -size * 0.42, size * 0.07, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(size * 0.15, -size * 0.42, size * 0.07, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(-size * 0.13, -size * 0.44, size * 0.025, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(size * 0.17, -size * 0.44, size * 0.025, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#2a1a0a';
+      ctx.beginPath();
+      ctx.arc(0, -size * 0.26, size * 0.08, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = '#2a1a0a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, -size * 0.18);
+      ctx.quadraticCurveTo(-size * 0.08, -size * 0.1, -size * 0.15, -size * 0.14);
+      ctx.moveTo(0, -size * 0.18);
+      ctx.quadraticCurveTo(size * 0.08, -size * 0.1, size * 0.15, -size * 0.14);
+      ctx.stroke();
+
+      ctx.fillStyle = '#ff6688';
+      ctx.beginPath();
+      ctx.ellipse(0, -size * 0.12, size * 0.04, size * 0.06, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+
+      // Шлем
+      ctx.save();
+      ctx.translate(sway, bounce);
+      ctx.fillStyle = 'rgba(120, 200, 255, 0.15)';
+      ctx.strokeStyle = 'rgba(150, 220, 255, 0.6)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, -size * 0.4, size * 0.55, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+      ctx.beginPath();
+      ctx.ellipse(-size * 0.25, -size * 0.6, size * 0.12, size * 0.2, -0.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#aaaaaa';
+      ctx.beginPath();
+      ctx.ellipse(0, -size * 0.02, size * 0.3, size * 0.06, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.restore();
+    }
+
+    // === РАССТОЯНИЕ ===
+    function distance(x1, y1, x2, y2) {
+      const dx = x1 - x2;
+      const dy = y1 - y2;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    // === СПАВН ПОДАРКА ===
+    // forceGreen = true → гарантированно зелёный
+    function spawnGift(forceGreen = false) {
+      const cfg = DIFFICULTIES[selectedDifficulty];
+
+      // Считаем сколько красных сейчас на экране
+      let redsOnScreen = 0;
+      for (let g of gifts) {
+        if (g.red && g.alive) redsOnScreen++;
+      }
+
+      // Решаем, будет ли этот подарок красным:
+      // — не если принудительно зелёный
+      // — только если не превышаем лимит красных
+      // — с шансом redChance
+      const makeRed = !forceGreen && redsOnScreen < cfg.maxReds && Math.random() < cfg.redChance;
+
+      let x, y, tries = 0;
+      do {
+        x = 60 + Math.random() * (W - 120);
+        y = 70 + Math.random() * (H - 140);
+        tries++;
+        let tooClose = false;
+        for (let g of gifts) {
+          if (distance(x, y, g.x, g.y) < cfg.minSpawnDist) {
+            tooClose = true;
+            break;
+          }
+        }
+        // Также не спавним слишком близко к игроку
+        if (distance(x, y, player.x, player.y) < 120) tooClose = true;
+        if (!tooClose) break;
+      } while (tries < 20);
+
+      gifts.push({
+        x: x,
+        y: y,
+        size: 22,
+        bobFrame: Math.random() * 6,
+        red: makeRed,
+        colorIndex: Math.floor(Math.random() * GIFT_COLORS.length),  // случайный цвет
+        colorShift: 0,  // для штрафных — сдвиг цвета во времени
+        wanderAngle: Math.random() * Math.PI * 2,
+        wanderSpeed: cfg.redSpeed,
+        lifetime: makeRed ? cfg.redLifetime : -1,
+        alive: true,
+      });
+    }
+
+    // === НАЧАЛО ИГРЫ ===
+    function startGame(difficulty) {
+      selectedDifficulty = difficulty;
+      const cfg = DIFFICULTIES[difficulty];
+      giftsCollected = 0;
+      gifts.length = 0;
+      lives = MAX_LIVES;
+      invulnTimer = 0;
+      food = null;
+      foodTimer = randomFoodDelay();
+      popups.length = 0;
+      comment = null;
+      ghostWarnCooldown = 0;
+      saidHalfway = false;
+      saidAlmost = false;
+      player.x = W / 2;
+      player.y = H / 2;
+
+      // Спавним подарки — на старте только обычные (штрафные появятся позже)
+      for (let i = 0; i < cfg.maxGifts; i++) {
+        spawnGift(true);
+      }
+
+      // Спавним 3 привидения с краёв экрана — у каждого свой характер
+      ghosts.length = 0;
+      const ghostColors = ['#ffffff', '#aaffff', '#ffaaff'];
+      const ghostTypes = ['chaser', 'flanker', 'drifter'];
+      for (let i = 0; i < 3; i++) {
+        const edge = Math.floor(Math.random() * 4);
+        let gx, gy;
+        if (edge === 0) { gx = -40; gy = Math.random() * H; }
+        else if (edge === 1) { gx = W + 40; gy = Math.random() * H; }
+        else if (edge === 2) { gx = Math.random() * W; gy = -40; }
+        else { gx = Math.random() * W; gy = H + 40; }
+
+        ghosts.push({
+          x: gx,
+          y: gy,
+          size: 30,
+          // Заметная разница в скорости: охотник медленный, дрейфующий быстрый
+          speed: cfg.ghostSpeed * (0.6 + i * 0.4),  // 0.6x, 1.0x, 1.4x
+          color: ghostColors[i],
+          type: ghostTypes[i],
+          wobble: Math.random() * 6,
+          wobbleDir: 1,
+          driftAngle: Math.random() * Math.PI * 2,
+          flankDir: i === 1 ? 0.4 : -0.4,
+        });
+      }
+
+      gameState = 'playing';
+      say('start');
+    }
+
+    // === ОБНОВЛЯЕМ ПОДАРКИ ===
+    function updateGifts() {
+      const cfg = DIFFICULTIES[selectedDifficulty];
+      let needGreenReplacements = 0;  // сколько зелёных нужно точно
+
+      for (let g of gifts) {
+        if (!g.alive) continue;
+
+        g.bobFrame += 0.05;
+
+        // ШТРАФНОЙ ПОДАРОК — медленно бродит + меняет цвет + таймер жизни
+        if (g.red) {
+          // Меняем цвет со временем
+          g.colorShift += 0.03;
+
+          if (Math.random() < 0.02) {
+            g.wanderAngle += (Math.random() - 0.5) * 1.5;
+          }
+          g.x += Math.cos(g.wanderAngle) * g.wanderSpeed;
+          g.y += Math.sin(g.wanderAngle) * g.wanderSpeed;
+
+          if (g.x < g.size) { g.x = g.size; g.wanderAngle = Math.PI - g.wanderAngle; }
+          if (g.x > W - g.size) { g.x = W - g.size; g.wanderAngle = Math.PI - g.wanderAngle; }
+          if (g.y < g.size) { g.y = g.size; g.wanderAngle = -g.wanderAngle; }
+          if (g.y > H - g.size) { g.y = H - g.size; g.wanderAngle = -g.wanderAngle; }
+
+          // Таймер жизни
+          g.lifetime--;
+          if (g.lifetime <= 0) {
+            g.alive = false;
+            needGreenReplacements++;  // красный исчез → на замену только зелёный
+          }
+        }
+
+        // Проверка подбора
+        if (distance(g.x, g.y, player.x, player.y) < g.size + player.size * 0.5) {
+          g.alive = false;
+          if (g.red) {
+            giftsCollected = Math.max(0, giftsCollected - 2);
+            needGreenReplacements++;  // красный пойман → на замену только зелёный
+            say('redGift');
+          } else {
+            giftsCollected++;
+            // зелёный собран → на замену может быть красный (по шансу)
+
+            // Комментарий: сначала особые моменты, иначе — обычная фраза (не всегда)
+            if (!saidAlmost && giftsCollected >= cfg.target - 3 && giftsCollected < cfg.target) {
+              saidAlmost = true;
+              say('almost');
+            } else if (!saidHalfway && giftsCollected >= Math.ceil(cfg.target / 2)) {
+              saidHalfway = true;
+              say('halfway');
+            } else {
+              say('gift', 0.35);  // говорит примерно за каждый третий подарок
+            }
+          }
+        }
+      }
+
+      // Удаляем собранные и истёкшие
+      for (let i = gifts.length - 1; i >= 0; i--) {
+        if (!gifts[i].alive) gifts.splice(i, 1);
+      }
+
+      // Добавляем новые
+      let spawned = 0;
+      while (gifts.length < cfg.maxGifts) {
+        if (spawned < needGreenReplacements) {
+          // Этот слот — гарантированно зелёный
+          spawnGift(true);  // forceGreen = true
+        } else {
+          spawnGift(false); // обычный спавн (может быть красным по шансу)
+        }
+        spawned++;
+      }
+
+      // Победа
+      if (giftsCollected >= cfg.target) {
+        gameState = 'won';
+        say('win');
+      }
+    }
+
+    // === КОРМ: случайная задержка до появления ===
+    function randomFoodDelay() {
+      const [min, max] = DIFFICULTIES[selectedDifficulty].foodDelay;
+      return min + Math.floor(Math.random() * (max - min));
+    }
+
+    // === КОРМ: ставим миску на свободное место ===
+    function spawnFood() {
+      let x, y, tries = 0;
+      do {
+        x = 60 + Math.random() * (W - 120);
+        y = 70 + Math.random() * (H - 140);
+        tries++;
+        let tooClose = distance(x, y, player.x, player.y) < 150;  // не под носом у собаки
+        for (let g of gifts) {
+          if (distance(x, y, g.x, g.y) < 60) tooClose = true;     // и не на подарке
+        }
+        if (!tooClose) break;
+      } while (tries < 20);
+
+      food = {
+        x: x,
+        y: y,
+        size: 22,
+        bobFrame: 0,
+        lifetime: FOOD_LIFETIME,
+      };
+      say('foodAppeared');
+    }
+
+    // === КОРМ: обновление ===
+    function updateFood() {
+      if (food) {
+        food.bobFrame += 0.05;
+        food.lifetime--;
+
+        // Собака съела корм
+        if (distance(food.x, food.y, player.x, player.y) < food.size + player.size * 0.5) {
+          lives = Math.min(MAX_LIVES, lives + 1);
+          addPopup(food.x, food.y - 20, '+1 ❤', '#ff4466');
+          say('ateFood');
+          food = null;
+          foodTimer = randomFoodDelay();
+        } else if (food.lifetime <= 0) {
+          // Не успел — миска исчезла
+          food = null;
+          foodTimer = randomFoodDelay();
+        }
+      } else if (lives < MAX_LIVES) {
+        // Таймер идёт, только когда жизнь потеряна — при полных жизнях корм не нужен
+        foodTimer--;
+        if (foodTimer <= 0) spawnFood();
+      }
+    }
+
+    // === ВСПЛЫВАЮЩИЕ НАДПИСИ ===
+    function addPopup(x, y, text, color) {
+      popups.push({ x: x, y: y, text: text, color: color, life: 60 });  // живёт 1 сек
+    }
+
+    function updatePopups() {
+      for (let p of popups) {
+        p.y -= 0.7;   // уплывает вверх
+        p.life--;
+      }
+      for (let i = popups.length - 1; i >= 0; i--) {
+        if (popups[i].life <= 0) popups.splice(i, 1);
+      }
+    }
+
+    function drawPopups() {
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = 'bold 22px "Segoe UI", sans-serif';
+      for (let p of popups) {
+        ctx.globalAlpha = p.life / 60;  // постепенно тает
+        ctx.fillStyle = p.color;
+        ctx.fillText(p.text, p.x, p.y);
+      }
+      ctx.globalAlpha = 1;
+      ctx.textAlign = 'left';
+    }
+
+    // === РИСУЕМ МИСКУ С КОРМОМ ===
+    function drawFood(f) {
+      const s = f.size;
+      const bob = Math.sin(f.bobFrame) * 2;
+      ctx.save();
+      ctx.translate(f.x, f.y + bob);
+
+      // Последние 2 секунды — мигает, предупреждая, что скоро исчезнет
+      if (f.lifetime < 120 && Math.floor(f.lifetime / 8) % 2 === 0) {
+        ctx.globalAlpha = 0.3;
+      }
+
+      // Тёплое свечение вокруг — чтобы миску было видно издалека
+      const pulse = 1 + Math.sin(f.bobFrame * 2) * 0.1;
+      const glowR = s * 1.6 * pulse;
+      const glow = ctx.createRadialGradient(0, 2, 0, 0, 2, glowR);
+      glow.addColorStop(0, 'rgba(255, 220, 120, 0.45)');
+      glow.addColorStop(1, 'rgba(255, 220, 120, 0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(0, 2, glowR, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Тень
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+      ctx.beginPath();
+      ctx.ellipse(0, s * 0.65, s * 0.9, s * 0.15, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Миска (металлическая, сужается книзу)
+      ctx.fillStyle = '#c9d1e0';
+      ctx.strokeStyle = '#8a94a8';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-s, -1);
+      ctx.lineTo(s, -1);
+      ctx.lineTo(s * 0.7, s * 0.55);
+      ctx.lineTo(-s * 0.7, s * 0.55);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // Край миски
+      ctx.fillStyle = '#e4e9f2';
+      ctx.beginPath();
+      ctx.ellipse(0, -1, s, s * 0.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Горка корма
+      const kibble = [[-10, -4], [-4, -7], [3, -6], [9, -3], [-6, -1], [0, -2], [6, 0]];
+      for (let i = 0; i < kibble.length; i++) {
+        ctx.fillStyle = i % 2 ? '#8b5a2b' : '#a0522d';
+        ctx.beginPath();
+        ctx.arc(kibble[i][0], kibble[i][1], 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Косточка на боку миски
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(-6, 4.5, 12, 3);
+      for (const [bx, by] of [[-6, 4.5], [-6, 7.5], [6, 4.5], [6, 7.5]]) {
+        ctx.beginPath();
+        ctx.arc(bx, by, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+
+    // === РЕПЛИКИ: собака что-то говорит ===
+    // event — какое событие (ключ из PHRASES), chance — с какой вероятностью сказать
+    function say(event, chance = 1) {
+      if (Math.random() > chance) return;
+
+      const priority = PHRASE_PRIORITY[event];
+      // Собака ещё говорит что-то не менее важное — не перебиваем
+      if (comment && comment.age < comment.duration && priority <= comment.priority) return;
+
+      const list = PHRASES[event];
+      let text;
+      do {
+        text = list[Math.floor(Math.random() * list.length)];
+      } while (text === lastPhrase && list.length > 1);
+      lastPhrase = text;
+
+      comment = {
+        text: text,
+        age: 0,                              // сколько кадров фраза уже на экране
+        duration: 120 + text.length * 2,     // длинные фразы висят дольше
+        priority: priority,
+      };
+    }
+
+    function updateComment() {
+      if (!comment) return;
+      comment.age++;
+      if (comment.age > comment.duration + 20) comment = null;  // +20 кадров на исчезание
+    }
+
+    function drawComment() {
+      if (!comment) return;
+
+      // Плавное появление и исчезание
+      const fadeIn = Math.min(1, comment.age / 10);
+      const fadeOut = comment.age > comment.duration ? 1 - (comment.age - comment.duration) / 20 : 1;
+
+      // Текст «печатается» по буквам
+      const shown = comment.text.slice(0, Math.floor(comment.age * 1.5));
+
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, Math.min(fadeIn, fadeOut));
+
+      // Полоска внизу экрана
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+      ctx.fillRect(0, H - 44, W, 44);
+      ctx.fillStyle = 'rgba(100, 200, 255, 0.4)';
+      ctx.fillRect(0, H - 44, W, 1.5);
+
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#d4a05a';
+      ctx.font = 'bold 17px "Segoe UI", sans-serif';
+      ctx.fillText('🐶 Пёс:', 20, H - 22);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '17px "Segoe UI", sans-serif';
+      ctx.fillText(shown, 105, H - 22);
+
+      ctx.restore();
+    }
+
+    // === ОБНОВЛЯЕМ ПРИВИДЕНИЯ ===
+    function updateGhosts() {
+      // Таймер неуязвимости
+      if (invulnTimer > 0) invulnTimer--;
+      if (ghostWarnCooldown > 0) ghostWarnCooldown--;
+
+      for (let gh of ghosts) {
+        const dx = player.x - gh.x;
+        const dy = player.y - gh.y;
+        // Math.max — защита от деления на ноль, если привидение ровно на собаке
+        const dist = Math.max(0.1, Math.sqrt(dx * dx + dy * dy));
+        const angleToPlayer = Math.atan2(dy, dx);
+
+        // Разная логика движения в зависимости от типа
+        let moveX = 0, moveY = 0;
+
+        if (gh.type === 'chaser') {
+          // Охотник — идёт прямо к игроку
+          moveX = (dx / dist) * gh.speed;
+          moveY = (dy / dist) * gh.speed;
+
+        } else if (gh.type === 'flanker') {
+          // Фланговый — забегает сбоку, кружит вокруг игрока
+          const flankAngle = angleToPlayer + gh.flankDir;
+          moveX = Math.cos(flankAngle) * gh.speed;
+          moveY = Math.sin(flankAngle) * gh.speed;
+          // Меняем направление кружения иногда
+          if (Math.random() < 0.003) gh.flankDir *= -1;
+
+        } else if (gh.type === 'drifter') {
+          // Дрейфующий — идёт к игроку, но виляет
+          gh.driftAngle += (Math.random() - 0.5) * 0.1;
+          const driftAngle = angleToPlayer + Math.sin(gh.driftAngle) * 0.6;
+          moveX = Math.cos(driftAngle) * gh.speed;
+          moveY = Math.sin(driftAngle) * gh.speed;
+        }
+
+        gh.x += moveX;
+        gh.y += moveY;
+
+        // Расталкивание привидений — держим на расстоянии друг от друга
+        for (let other of ghosts) {
+          if (other === gh) continue;
+          const gd = distance(gh.x, gh.y, other.x, other.y);
+          const minDist = gh.size + other.size + 40;  // +40px запас
+          if (gd < minDist && gd > 0.1) {
+            const pushX = (gh.x - other.x) / gd;
+            const pushY = (gh.y - other.y) / gd;
+            const push = (minDist - gd) * 0.8;  // сильно расталкиваем
+            gh.x += pushX * push;
+            gh.y += pushY * push;
+          }
+        }
+
+        // Покачивание
+        gh.wobble += 0.06 * gh.wobbleDir;
+        if (gh.wobble > 6 || gh.wobble < -6) gh.wobbleDir *= -1;
+
+        // Привидение подкралось близко — собака предупреждает (не чаще раза в 10 сек)
+        if (invulnTimer <= 0 && ghostWarnCooldown <= 0 && dist < 130) {
+          say('ghostNear');
+          ghostWarnCooldown = 600;
+        }
+
+        // Проверка столкновения с игроком
+        if (invulnTimer <= 0 && distance(gh.x, gh.y, player.x, player.y) < gh.size * 0.7 + player.size * 0.5) {
+          lives--;
+          invulnTimer = 90;  // ~1.5 сек неуязвимости
+          if (lives === 1) say('lastLife');
+          else if (lives > 1) say('hit');
+          // Отбрасываем ВСЕ привидения назад
+          for (let g2 of ghosts) {
+            const gdx = g2.x - player.x;
+            const gdy = g2.y - player.y;
+            const gdist = Math.sqrt(gdx * gdx + gdy * gdy);
+            if (gdist > 0.1) {
+              g2.x += (gdx / gdist) * 120;
+              g2.y += (gdy / gdist) * 120;
+            }
+          }
+        }
+      }
+
+      // Поражение
+      if (lives <= 0 && gameState === 'playing') {
+        gameState = 'lost';
+        say('lose');
+      }
+    }
+
+    // === РИСУЕМ ПРИВИДЕНИЕ ===
+    function drawGhost(gh) {
+      ctx.save();
+      ctx.translate(gh.x, gh.y);
+
+      const w = gh.wobble;  // покачивание
+      const r = gh.size;    // радиус
+
+      // Полупрозрачное тело
+      ctx.globalAlpha = 0.8;
+
+      // Основное тело — купол сверху, волнистый низ
+      ctx.fillStyle = gh.color;
+      ctx.beginPath();
+      ctx.arc(0, -5, r, Math.PI, 0);  // верхний полукруг
+
+      // Волнистый низ (4 волны)
+      const waveY = r * 0.8;
+      const waveH = r * 0.3;
+      ctx.lineTo(r, waveY);
+      // Волны справа налево
+      for (let i = 0; i < 4; i++) {
+        const x1 = r - (i * 2 + 1) * (r / 4);
+        const x2 = r - (i * 2 + 2) * (r / 4);
+        ctx.quadraticCurveTo(
+          x1, waveY - waveH + w,
+          x2, waveY + Math.sin(w) * 2
+        );
+      }
+      ctx.closePath();
+      ctx.fill();
+
+      // Свечение
+      ctx.shadowColor = gh.color;
+      ctx.shadowBlur = 15;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      ctx.globalAlpha = 1;
+
+      // Глаза (тёмные)
+      ctx.fillStyle = '#1a1a3a';
+      ctx.beginPath();
+      ctx.ellipse(-r * 0.3, -r * 0.2, r * 0.12, r * 0.18, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(r * 0.3, -r * 0.2, r * 0.12, r * 0.18, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Зрачки (смотрят на игрока)
+      const dx = player.x - gh.x;
+      const dy = player.y - gh.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const pupilX = dist > 0 ? (dx / dist) * r * 0.04 : 0;
+      const pupilY = dist > 0 ? (dy / dist) * r * 0.04 : 0;
+      ctx.fillStyle = '#ff4444';
+      ctx.beginPath();
+      ctx.arc(-r * 0.3 + pupilX * 3, -r * 0.2 + pupilY * 3, r * 0.05, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(r * 0.3 + pupilX * 3, -r * 0.2 + pupilY * 3, r * 0.05, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Рот
+      ctx.strokeStyle = '#1a1a3a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, r * 0.15, r * 0.2, 0.2, Math.PI - 0.2);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    // === РИСУЕМ ПОДАРОК ===
+    function drawGift(g) {
+      const bob = Math.sin(g.bobFrame) * 3;
+      ctx.save();
+      ctx.translate(g.x, g.y + bob);
+
+      // Определяем цвет:
+      // Обычный — статичный случайный цвет
+      // Штрафной — переливается всеми цветами со временем
+      let ci;
+      if (g.red) {
+        ci = Math.floor(g.colorShift) % GIFT_COLORS.length;
+      } else {
+        ci = g.colorIndex;
+      }
+      const color = GIFT_COLORS[ci];
+
+      // Ножки (только у штрафных)
+      if (g.red) {
+        ctx.strokeStyle = '#5a3a2a';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(-6, 8);
+        ctx.lineTo(-10, 18 + Math.sin(g.bobFrame * 3) * 3);
+        ctx.moveTo(6, 8);
+        ctx.lineTo(10, 18 + Math.sin(g.bobFrame * 3 + Math.PI) * 3);
+        ctx.stroke();
+      }
+
+      // Тень
+      ctx.fillStyle = 'rgba(0,0,0,0.2)';
+      ctx.beginPath();
+      ctx.ellipse(0, g.size * 0.8, g.size * 0.6, g.size * 0.15, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Коробка
+      ctx.fillStyle = color.fill;
+      ctx.fillRect(-g.size * 0.7, -g.size * 0.7, g.size * 1.4, g.size * 1.4);
+      ctx.strokeStyle = color.stroke;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-g.size * 0.7, -g.size * 0.7, g.size * 1.4, g.size * 1.4);
+
+      // Лента (золотая)
+      ctx.fillStyle = '#ffdd44';
+      ctx.fillRect(-3, -g.size * 0.7, 6, g.size * 1.4);
+      ctx.fillRect(-g.size * 0.7, -3, g.size * 1.4, 6);
+
+      // Бант
+      ctx.fillStyle = '#ffdd44';
+      ctx.beginPath();
+      ctx.ellipse(-6, -g.size * 0.7, 5, 4, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(6, -g.size * 0.7, 5, 4, 0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#e6b800';
+      ctx.beginPath();
+      ctx.arc(0, -g.size * 0.7, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Блик
+      ctx.fillStyle = 'rgba(255,255,255,0.25)';
+      ctx.fillRect(-g.size * 0.6, -g.size * 0.6, g.size * 0.3, g.size * 0.2);
+
+      ctx.restore();
+    }
+
+    // === РИСУЕМ ИНТЕРФЕЙС ===
+    function drawUI() {
+      const cfg = DIFFICULTIES[selectedDifficulty];
+
+      // Фон счётчика
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+      ctx.fillRect(15, 15, 260, 45);
+      ctx.strokeStyle = 'rgba(100, 200, 255, 0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(15, 15, 260, 45);
+
+      // Иконка подарка
+      ctx.fillStyle = '#2ecc40';
+      ctx.fillRect(28, 27, 18, 18);
+      ctx.fillStyle = '#ffdd44';
+      ctx.fillRect(35, 27, 4, 18);
+      ctx.fillRect(28, 34, 18, 4);
+
+      // Счётчик
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 22px "Segoe UI", sans-serif';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(giftsCollected + ' / ' + cfg.target, 58, 38);
+
+      // Сложность
+      ctx.fillStyle = cfg.color;
+      ctx.font = 'bold 13px "Segoe UI", sans-serif';
+      ctx.fillText(cfg.name, 140, 30);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.font = '11px "Segoe UI", sans-serif';
+      ctx.fillText('с ножками = -2', 140, 45);
+
+      // Жизни (сердечки справа сверху)
+      const heartX = W - 30;
+      for (let i = 0; i < MAX_LIVES; i++) {
+        drawHeart(heartX - i * 30, 38, 12, i < lives);
+      }
+    }
+
+    // === РИСУЕМ СЕРДЦЕ ===
+    function drawHeart(x, y, size, filled) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.globalAlpha = filled ? 1 : 0.2;
+
+      ctx.fillStyle = filled ? '#ff4466' : '#444466';
+      ctx.beginPath();
+      ctx.moveTo(0, size * 0.3);
+      ctx.bezierCurveTo(-size, -size * 0.5, -size * 0.5, -size, 0, -size * 0.3);
+      ctx.bezierCurveTo(size * 0.5, -size, size, -size * 0.5, 0, size * 0.3);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    // === РИСУЕМ МЕНЮ ===
+    function drawMenu() {
+      drawBackground();
+
+      // Заголовок
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 52px "Segoe UI", sans-serif';
+      ctx.fillText('КОСМИЧЕСКИЙ ПЁС', W / 2, 75);
+
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.font = '18px "Segoe UI", sans-serif';
+      ctx.fillText('Выбери сложность', W / 2, 120);
+
+      // Кнопки сложности (занимают по высоте от 150 до 490)
+      const keys = Object.keys(DIFFICULTIES);
+      const btnW = 340;
+      const btnH = 70;
+      const startY = 150;
+      const gap = 20;
+
+      let hoverIndex = -1;
+
+      for (let i = 0; i < keys.length; i++) {
+        const cfg = DIFFICULTIES[keys[i]];
+        const bx = W / 2 - btnW / 2;
+        const by = startY + i * (btnH + gap);
+
+        // Проверяем наведение мыши
+        const hover = mouseX >= bx && mouseX <= bx + btnW &&
+                      mouseY >= by && mouseY <= by + btnH;
+        if (hover) hoverIndex = i;
+
+        // Фон кнопки
+        ctx.fillStyle = hover ? 'rgba(255, 255, 255, 0.15)' : 'rgba(255, 255, 255, 0.07)';
+        ctx.fillRect(bx, by, btnW, btnH);
+        ctx.strokeStyle = cfg.color;
+        ctx.lineWidth = hover ? 3 : 2;
+        ctx.strokeRect(bx, by, btnW, btnH);
+
+        // Название
+        ctx.textAlign = 'left';
+        ctx.fillStyle = cfg.color;
+        ctx.font = 'bold 22px "Segoe UI", sans-serif';
+        ctx.fillText(cfg.name, bx + 20, by + 27);
+
+        // Описание
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+        ctx.font = '14px "Segoe UI", sans-serif';
+        ctx.fillText(cfg.desc, bx + 20, by + 50);
+
+        // Цель справа
+        ctx.textAlign = 'right';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+        ctx.font = '13px "Segoe UI", sans-serif';
+        ctx.fillText('цель: ' + cfg.target + ' подарков', bx + btnW - 20, by + 27);
+        ctx.fillText('на экране: ' + cfg.maxGifts, bx + btnW - 20, by + 50);
+
+        // Клик по кнопке
+        if (hover && mouseClicked) {
+          startGame(keys[i]);
+        }
+      }
+
+      // Подсказка внизу
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+      ctx.font = '14px "Segoe UI", sans-serif';
+      ctx.fillText('Управление — стрелки или WASD  ·  P или Esc — пауза', W / 2, H - 20);
+
+      // Мини-собака на превью (между кнопками и подсказкой)
+      drawDog(W / 2, H - 70, 30);
+
+      ctx.textAlign = 'left';
+    }
+
+    // === ЭКРАН ПОБЕДЫ ===
+    function drawWinScreen() {
+      drawBackground();
+      for (let g of gifts) drawGift(g);
+      drawDog(player.x, player.y, player.size);
+
+      // Затемнение
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      ctx.fillRect(0, H / 2 - 80, W, 160);
+
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#2ecc40';
+      ctx.font = 'bold 52px "Segoe UI", sans-serif';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('ПОБЕДА!', W / 2, H / 2 - 20);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '20px "Segoe UI", sans-serif';
+      ctx.fillText('Ты собрал все подарки!', W / 2, H / 2 + 20);
+
+      // Кнопка "Играть снова"
+      const btnW = 250, btnH = 50;
+      const bx = W / 2 - btnW / 2, by = H / 2 + 50;
+      const hover = mouseX >= bx && mouseX <= bx + btnW &&
+                    mouseY >= by && mouseY <= by + btnH;
+
+      ctx.fillStyle = hover ? 'rgba(46, 204, 64, 0.3)' : 'rgba(46, 204, 64, 0.15)';
+      ctx.fillRect(bx, by, btnW, btnH);
+      ctx.strokeStyle = '#2ecc40';
+      ctx.lineWidth = hover ? 3 : 2;
+      ctx.strokeRect(bx, by, btnW, btnH);
+
+      ctx.fillStyle = '#2ecc40';
+      ctx.font = 'bold 18px "Segoe UI", sans-serif';
+      ctx.fillText('Играть снова', W / 2, by + 25);
+
+      if (hover && mouseClicked) {
+        gameState = 'menu';
+      }
+
+      ctx.textAlign = 'left';
+    }
+
+    // === ЭКРАН ПОРАЖЕНИЯ ===
+    function drawLoseScreen() {
+      drawBackground();
+      for (let g of gifts) drawGift(g);
+      for (let gh of ghosts) drawGhost(gh);
+      drawDog(player.x, player.y, player.size);
+
+      // Затемнение
+      ctx.fillStyle = 'rgba(40, 0, 0, 0.7)';
+      ctx.fillRect(0, H / 2 - 80, W, 160);
+
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ff4444';
+      ctx.font = 'bold 52px "Segoe UI", sans-serif';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('ИГРА ОКОНЧЕНА', W / 2, H / 2 - 20);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '20px "Segoe UI", sans-serif';
+      ctx.fillText('Привидения поймали тебя! Собрано: ' + giftsCollected, W / 2, H / 2 + 20);
+
+      // Кнопка "Играть снова"
+      const btnW = 250, btnH = 50;
+      const bx = W / 2 - btnW / 2, by = H / 2 + 50;
+      const hover = mouseX >= bx && mouseX <= bx + btnW &&
+                    mouseY >= by && mouseY <= by + btnH;
+
+      ctx.fillStyle = hover ? 'rgba(255, 68, 68, 0.3)' : 'rgba(255, 68, 68, 0.15)';
+      ctx.fillRect(bx, by, btnW, btnH);
+      ctx.strokeStyle = '#ff4444';
+      ctx.lineWidth = hover ? 3 : 2;
+      ctx.strokeRect(bx, by, btnW, btnH);
+
+      ctx.fillStyle = '#ff4444';
+      ctx.font = 'bold 18px "Segoe UI", sans-serif';
+      ctx.fillText('Попробовать снова', W / 2, by + 25);
+
+      if (hover && mouseClicked) {
+        gameState = 'menu';
+      }
+
+      ctx.textAlign = 'left';
+    }
+
+    // === ОБНОВЛЕНИЕ (логика игры, ровно 60 раз в секунду) ===
+    function update() {
+      updateStars();                         // звёзды мерцают всегда, даже на паузе
+      if (gameState === 'paused') return;    // на паузе всё остальное замирает
+      updateComment();
+      if (gameState === 'playing') {
+        updatePlayer();
+        updateGifts();
+        updateFood();
+        updateGhosts();
+        updatePopups();
+      } else {
+        player.animFrame += 0.02;  // собака дышит и в меню, и на финальных экранах
+      }
+    }
+
+    // === ИГРОВАЯ СЦЕНА целиком (нужна и в игре, и под затемнением паузы) ===
+    function drawScene() {
+      drawBackground();
+      for (let g of gifts) drawGift(g);
+      if (food) drawFood(food);
+      for (let gh of ghosts) drawGhost(gh);
+
+      // Мигание собаки при неуязвимости — полупрозрачной рисуем только её
+      if (invulnTimer > 0 && invulnTimer % 10 < 5) {
+        ctx.globalAlpha = 0.5;
+      }
+      drawDog(player.x, player.y, player.size);
+      ctx.globalAlpha = 1;
+
+      drawPopups();
+      drawUI();
+      drawComment();
+    }
+
+    // === ЭКРАН ПАУЗЫ (поверх замершей игры) ===
+    function drawPauseScreen() {
+      drawScene();
+
+      ctx.fillStyle = 'rgba(5, 5, 30, 0.65)';
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 56px "Segoe UI", sans-serif';
+      ctx.fillText('ПАУЗА', W / 2, H / 2 - 70);
+
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.font = '16px "Segoe UI", sans-serif';
+      ctx.fillText('P или Esc — продолжить', W / 2, H / 2 - 25);
+
+      // Две кнопки
+      const buttons = [
+        { text: 'Продолжить', color: '#2ecc40', rgb: '46, 204, 64', action: () => { gameState = 'playing'; } },
+        { text: 'Выйти в меню', color: '#ff8844', rgb: '255, 136, 68', action: () => { gameState = 'menu'; } },
+      ];
+      const btnW = 250, btnH = 50;
+      for (let i = 0; i < buttons.length; i++) {
+        const b = buttons[i];
+        const bx = W / 2 - btnW / 2;
+        const by = H / 2 + 10 + i * (btnH + 15);
+        const hover = mouseX >= bx && mouseX <= bx + btnW &&
+                      mouseY >= by && mouseY <= by + btnH;
+
+        ctx.fillStyle = `rgba(${b.rgb}, ${hover ? 0.3 : 0.15})`;
+        ctx.fillRect(bx, by, btnW, btnH);
+        ctx.strokeStyle = b.color;
+        ctx.lineWidth = hover ? 3 : 2;
+        ctx.strokeRect(bx, by, btnW, btnH);
+
+        ctx.fillStyle = b.color;
+        ctx.font = 'bold 18px "Segoe UI", sans-serif';
+        ctx.fillText(b.text, W / 2, by + btnH / 2);
+
+        if (hover && mouseClicked) b.action();
+      }
+
+      ctx.textAlign = 'left';
+    }
+
+    // === РИСОВАНИЕ (столько раз, сколько умеет экран) ===
+    function draw() {
+      if (gameState === 'menu') {
+        drawMenu();
+      } else if (gameState === 'playing') {
+        drawScene();
+      } else if (gameState === 'paused') {
+        drawPauseScreen();
+      } else if (gameState === 'won') {
+        drawWinScreen();
+        drawComment();
+      } else if (gameState === 'lost') {
+        drawLoseScreen();
+        drawComment();
+      }
+    }
+
+    // === ГЛАВНЫЙ ЦИКЛ ===
+    // Экраны бывают 60 Гц, 120 Гц и даже 144 Гц. Чтобы игра везде шла
+    // с одинаковой скоростью, логику обновляем строго 60 раз в секунду,
+    // а рисуем — как получится у экрана.
+    const STEP = 1000 / 60;   // один «шаг» игры в миллисекундах
+    let lastTime = performance.now();
+    let timeBank = 0;         // накопленное время, которое ещё не «прожили»
+
+    function gameLoop(now) {
+      // Math.min — если вкладка была свёрнута, не догоняем минуты разом
+      timeBank += Math.min(now - lastTime, 250);
+      lastTime = now;
+
+      while (timeBank >= STEP) {
+        update();
+        timeBank -= STEP;
+      }
+
+      draw();
+      mouseClicked = false;  // клик обработан (или не нужен) — забываем его
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    // === СТАРТ ===
+    requestAnimationFrame(gameLoop);
+  </script>
+</body>
+</html>
